@@ -42,57 +42,170 @@ func PreviewJob(job model.Job, panel model.Panel) (Preview, error) {
 	if err := panel.Validate(); err != nil {
 		return Preview{}, err
 	}
-	free := []Rectangle{{Width: panel.Width, Height: panel.Height}}
-	result := Preview{JobID: job.ID, PanelID: panel.ID}
 
-	for pieceIndex, requirement := range job.Pieces {
-		for quantityIndex := 1; quantityIndex <= requirement.Quantity; quantityIndex++ {
-			placed := false
-			for freeIndex, candidate := range free {
-				for _, orientation := range orientations(requirement) {
-					footprintWidth, ok := addKerf(orientation.width, job.Kerf)
-					if !ok {
-						return Preview{}, fmt.Errorf("piece %q footprint exceeds integer range", requirement.Label)
-					}
-					footprintHeight, ok := addKerf(orientation.height, job.Kerf)
-					if !ok {
-						return Preview{}, fmt.Errorf("piece %q footprint exceeds integer range", requirement.Label)
-					}
-					if footprintWidth > candidate.Width || footprintHeight > candidate.Height {
-						continue
-					}
-					result.Placements = append(result.Placements, model.Placement{
-						PieceIndex:    pieceIndex + 1,
-						Label:         requirement.Label,
-						QuantityIndex: quantityIndex,
-						X:             candidate.X,
-						Y:             candidate.Y,
-						Width:         orientation.width,
-						Height:        orientation.height,
-						FootprintW:    footprintWidth,
-						FootprintH:    footprintHeight,
-						Rotated:       orientation.rotated,
-					})
-					free = replaceFreeRectangle(free, freeIndex, candidate, footprintWidth, footprintHeight)
-					placed = true
-					break
-				}
-				if placed {
-					break
-				}
-			}
-			if !placed {
-				result.Unplaced = append(result.Unplaced, Unplaced{
-					PieceIndex:    pieceIndex + 1,
-					Label:         requirement.Label,
-					QuantityIndex: quantityIndex,
-					Reason:        "no remaining rectangle can fit the piece with its kerf",
-				})
-			}
+	tasks := placementTasks(job)
+	for _, task := range tasks {
+		if _, ok := taskFootprints(task, job.Kerf); !ok {
+			return Preview{}, fmt.Errorf("piece %q footprint exceeds integer range", task.label)
 		}
+	}
+
+	result := Preview{JobID: job.ID, PanelID: panel.ID}
+	initialFree := []Rectangle{{Width: panel.Width, Height: panel.Height}}
+
+	if placements, free, ok := placeAll(tasks, job.Kerf, initialFree); ok {
+		result.Placements = placements
+		result.FreeRectangles = free
+		return result, nil
+	}
+
+	// No complete packing exists. Fall back to the greedy best-effort result so
+	// the preview still reports which pieces could not be placed.
+	free := initialFree
+	for _, task := range tasks {
+		placement, nextFree, placed := placeGreedy(task, job.Kerf, free)
+		if !placed {
+			result.Unplaced = append(result.Unplaced, Unplaced{
+				PieceIndex:    task.pieceIndex,
+				Label:         task.label,
+				QuantityIndex: task.quantityIndex,
+				Reason:        "no remaining rectangle can fit the piece with its kerf",
+			})
+			continue
+		}
+		result.Placements = append(result.Placements, placement)
+		free = nextFree
 	}
 	result.FreeRectangles = free
 	return result, nil
+}
+
+type placementTask struct {
+	pieceIndex    int
+	label         string
+	quantityIndex int
+	requirement   model.PieceRequirement
+}
+
+func placementTasks(job model.Job) []placementTask {
+	tasks := make([]placementTask, 0)
+	for pieceIndex, requirement := range job.Pieces {
+		for quantityIndex := 1; quantityIndex <= requirement.Quantity; quantityIndex++ {
+			tasks = append(tasks, placementTask{
+				pieceIndex:    pieceIndex + 1,
+				label:         requirement.Label,
+				quantityIndex: quantityIndex,
+				requirement:   requirement,
+			})
+		}
+	}
+	return tasks
+}
+
+// placementOption is an orientation together with its kerf-aware footprint.
+type placementOption struct {
+	width      int
+	height     int
+	footprintW int
+	footprintH int
+	rotated    bool
+}
+
+// taskFootprints returns the kerf-aware footprint for each viable orientation
+// of a task. The second return is false when the footprint would overflow the
+// integer range.
+func taskFootprints(task placementTask, kerf int) ([]placementOption, bool) {
+	options := make([]placementOption, 0, 2)
+	for _, orientation := range orientations(task.requirement) {
+		footprintWidth, ok := addKerf(orientation.width, kerf)
+		if !ok {
+			return nil, false
+		}
+		footprintHeight, ok := addKerf(orientation.height, kerf)
+		if !ok {
+			return nil, false
+		}
+		options = append(options, placementOption{
+			width:      orientation.width,
+			height:     orientation.height,
+			footprintW: footprintWidth,
+			footprintH: footprintHeight,
+			rotated:    orientation.rotated,
+		})
+	}
+	return options, true
+}
+
+// placeAll performs a depth-first search over the placement tasks, trying free
+// rectangles and orientations in the same canonical order as the greedy placer.
+// It returns the first complete packing it finds. The search order guarantees
+// that when the greedy strategy succeeds the result matches it exactly, while
+// still recovering packings that require rotating an earlier piece.
+func placeAll(tasks []placementTask, kerf int, free []Rectangle) ([]model.Placement, []Rectangle, bool) {
+	if len(tasks) == 0 {
+		return nil, append([]Rectangle(nil), free...), true
+	}
+	task := tasks[0]
+	options, ok := taskFootprints(task, kerf)
+	if !ok {
+		return nil, nil, false
+	}
+	for freeIndex, candidate := range free {
+		for _, option := range options {
+			if option.footprintW > candidate.Width || option.footprintH > candidate.Height {
+				continue
+			}
+			placement := model.Placement{
+				PieceIndex:    task.pieceIndex,
+				Label:         task.label,
+				QuantityIndex: task.quantityIndex,
+				X:             candidate.X,
+				Y:             candidate.Y,
+				Width:         option.width,
+				Height:        option.height,
+				FootprintW:    option.footprintW,
+				FootprintH:    option.footprintH,
+				Rotated:       option.rotated,
+			}
+			nextFree := replaceFreeRectangle(free, freeIndex, candidate, option.footprintW, option.footprintH)
+			if placements, remaining, ok := placeAll(tasks[1:], kerf, nextFree); ok {
+				return append([]model.Placement{placement}, placements...), remaining, true
+			}
+		}
+	}
+	return nil, nil, false
+}
+
+// placeGreedy places a single task using the first free rectangle and
+// orientation that fits, mirroring the original best-effort behavior used when
+// no complete packing exists.
+func placeGreedy(task placementTask, kerf int, free []Rectangle) (model.Placement, []Rectangle, bool) {
+	options, ok := taskFootprints(task, kerf)
+	if !ok {
+		return model.Placement{}, free, false
+	}
+	for freeIndex, candidate := range free {
+		for _, option := range options {
+			if option.footprintW > candidate.Width || option.footprintH > candidate.Height {
+				continue
+			}
+			placement := model.Placement{
+				PieceIndex:    task.pieceIndex,
+				Label:         task.label,
+				QuantityIndex: task.quantityIndex,
+				X:             candidate.X,
+				Y:             candidate.Y,
+				Width:         option.width,
+				Height:        option.height,
+				FootprintW:    option.footprintW,
+				FootprintH:    option.footprintH,
+				Rotated:       option.rotated,
+			}
+			nextFree := replaceFreeRectangle(free, freeIndex, candidate, option.footprintW, option.footprintH)
+			return placement, nextFree, true
+		}
+	}
+	return model.Placement{}, free, false
 }
 
 func orientations(requirement model.PieceRequirement) []orientation {
