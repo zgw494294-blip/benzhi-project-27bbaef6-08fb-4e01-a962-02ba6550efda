@@ -199,14 +199,13 @@ func Commit(value *model.Ledger, jobID string) (model.Receipt, error) {
 		return model.Receipt{}, fmt.Errorf("receipt %q already exists", receiptID)
 	}
 	offcutIDs := make([]string, 0, len(preview.FreeRectangles))
+	claimedIDs := make(map[string]struct{}, len(preview.FreeRectangles))
 	for index, rectangle := range preview.FreeRectangles {
 		if rectangle.Width <= 0 || rectangle.Height <= 0 {
 			continue
 		}
-		offcutID := fmt.Sprintf("offcut-%s-%d", job.ID, index+1)
-		if _, exists := value.Stock[offcutID]; exists {
-			return model.Receipt{}, fmt.Errorf("offcut panel %q already exists", offcutID)
-		}
+		offcutID := uniqueOffcutID(value.Stock, claimedIDs, job.ID, index+1)
+		claimedIDs[offcutID] = struct{}{}
 		offcutIDs = append(offcutIDs, offcutID)
 	}
 
@@ -253,6 +252,26 @@ func indexOfPositiveRectangle(rectangles []layout.Rectangle, current int) int {
 		}
 	}
 	return positiveIndex
+}
+
+// uniqueOffcutID returns a panel id for a commit's offcut that does not collide
+// with existing stock or with offcut ids already claimed during the same commit.
+// The preferred form is "offcut-<jobID>-<index>"; when that id is already taken,
+// a numeric suffix ("-2", "-3", ...) is appended until a free id is found. This
+// keeps deterministic naming for the common case while ensuring a user-created
+// panel whose id happens to match an offcut pattern never blocks an unrelated
+// job from committing.
+func uniqueOffcutID(stock map[string]model.Panel, claimed map[string]struct{}, jobID string, index int) string {
+	base := fmt.Sprintf("offcut-%s-%d", jobID, index)
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		if _, exists := stock[candidate]; !exists {
+			if _, taken := claimed[candidate]; !taken {
+				return candidate
+			}
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
 }
 
 func SortedPanelIDs(value model.Ledger) []string {
