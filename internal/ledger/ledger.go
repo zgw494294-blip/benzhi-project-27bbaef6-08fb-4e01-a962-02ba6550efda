@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 
 	"panelnest/internal/layout"
 	"panelnest/internal/model"
@@ -43,7 +45,36 @@ func Save(path string, value *model.Ledger) error {
 	if err := value.Validate(); err != nil {
 		return fmt.Errorf("validate ledger: %w", err)
 	}
-	data, err := json.MarshalIndent(value, "", "  ")
+
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open ledger lock: %w", err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock ledger: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	stored, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		stored, err = mergeLedgers(stored, *value)
+		if err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat ledger: %w", err)
+	} else {
+		stored = *value
+	}
+	if err := stored.Validate(); err != nil {
+		return fmt.Errorf("validate merged ledger: %w", err)
+	}
+
+	data, err := json.MarshalIndent(&stored, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode ledger: %w", err)
 	}
@@ -78,7 +109,112 @@ func Save(path string, value *model.Ledger) error {
 	if err := os.Rename(temporaryName, path); err != nil {
 		return fmt.Errorf("replace ledger: %w", err)
 	}
+	*value = stored
 	return nil
+}
+
+func mergeLedgers(stored, proposed model.Ledger) (model.Ledger, error) {
+	for id, panel := range proposed.Stock {
+		current, exists := stored.Stock[id]
+		if !exists {
+			stored.Stock[id] = panel
+			continue
+		}
+		merged, err := mergePanel(current, panel)
+		if err != nil {
+			return model.Ledger{}, fmt.Errorf("merge panel %q: %w", id, err)
+		}
+		stored.Stock[id] = merged
+	}
+	for id, job := range proposed.Jobs {
+		current, exists := stored.Jobs[id]
+		if !exists {
+			stored.Jobs[id] = job
+			continue
+		}
+		merged, err := mergeJob(current, job)
+		if err != nil {
+			return model.Ledger{}, fmt.Errorf("merge job %q: %w", id, err)
+		}
+		stored.Jobs[id] = merged
+	}
+	for id, receipt := range proposed.Receipts {
+		current, exists := stored.Receipts[id]
+		if exists && !reflect.DeepEqual(current, receipt) {
+			return model.Ledger{}, fmt.Errorf("merge receipt %q: conflicting updates", id)
+		}
+		stored.Receipts[id] = receipt
+	}
+
+	committedPanels := make(map[string]string)
+	for id, job := range stored.Jobs {
+		if job.Status != model.Committed {
+			continue
+		}
+		if other, exists := committedPanels[job.SourcePanelID]; exists && other != id {
+			return model.Ledger{}, fmt.Errorf("source panel %q was committed by both %q and %q", job.SourcePanelID, other, id)
+		}
+		committedPanels[job.SourcePanelID] = id
+	}
+	return stored, nil
+}
+
+func mergePanel(stored, proposed model.Panel) (model.Panel, error) {
+	if stored == proposed {
+		return stored, nil
+	}
+	storedStatus := stored.Status
+	proposedStatus := proposed.Status
+	stored.Status = ""
+	proposed.Status = ""
+	if stored != proposed {
+		return model.Panel{}, errors.New("conflicting updates")
+	}
+	stored.Status = storedStatus
+	if proposedStatus == model.Consumed {
+		stored.Status = model.Consumed
+	}
+	return stored, nil
+}
+
+func mergeJob(stored, proposed model.Job) (model.Job, error) {
+	if stored.ID != proposed.ID || stored.SourcePanelID != proposed.SourcePanelID || stored.Kerf != proposed.Kerf {
+		return model.Job{}, errors.New("conflicting updates")
+	}
+	if stored.Status == model.Committed || proposed.Status == model.Committed {
+		if !reflect.DeepEqual(stored.Pieces, proposed.Pieces) {
+			return model.Job{}, errors.New("pieces changed while the job was committed")
+		}
+		if stored.Status == model.Committed && proposed.Status == model.Committed && stored.ReceiptID != proposed.ReceiptID {
+			return model.Job{}, errors.New("conflicting receipts")
+		}
+		if proposed.Status == model.Committed {
+			return proposed, nil
+		}
+		return stored, nil
+	}
+	if stored.ReceiptID != proposed.ReceiptID {
+		return model.Job{}, errors.New("conflicting receipts")
+	}
+	if piecePrefix(stored.Pieces, proposed.Pieces) {
+		return proposed, nil
+	}
+	if piecePrefix(proposed.Pieces, stored.Pieces) {
+		return stored, nil
+	}
+	return model.Job{}, errors.New("conflicting piece updates")
+}
+
+func piecePrefix(prefix, pieces []model.PieceRequirement) bool {
+	if len(prefix) > len(pieces) {
+		return false
+	}
+	for index := range prefix {
+		if !reflect.DeepEqual(prefix[index], pieces[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func AddPanel(value *model.Ledger, panel model.Panel) error {
