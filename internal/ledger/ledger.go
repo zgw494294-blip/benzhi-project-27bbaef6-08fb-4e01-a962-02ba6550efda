@@ -157,9 +157,15 @@ func PreviewJob(value model.Ledger, jobID string) (layout.Preview, error) {
 	if !exists {
 		return layout.Preview{}, fmt.Errorf("job %q does not exist", jobID)
 	}
+	if job.Status != model.Draft {
+		return layout.Preview{}, fmt.Errorf("job %q is already committed", jobID)
+	}
 	panel, exists := value.Stock[job.SourcePanelID]
 	if !exists {
 		return layout.Preview{}, fmt.Errorf("source panel %q does not exist", job.SourcePanelID)
+	}
+	if panel.Status != model.Available {
+		return layout.Preview{}, fmt.Errorf("source panel %q is not available", job.SourcePanelID)
 	}
 	return layout.PreviewJob(job, panel)
 }
