@@ -35,6 +35,12 @@ type orientation struct {
 	rotated bool
 }
 
+type pieceInstance struct {
+	pieceIndex    int
+	quantityIndex int
+	requirement   model.PieceRequirement
+}
+
 func PreviewJob(job model.Job, panel model.Panel) (Preview, error) {
 	if err := job.Validate(); err != nil {
 		return Preview{}, err
@@ -92,7 +98,85 @@ func PreviewJob(job model.Job, panel model.Panel) (Preview, error) {
 		}
 	}
 	result.FreeRectangles = free
+	if len(result.Unplaced) != 0 {
+		instances := expandPieces(job.Pieces)
+		placements, remaining, found, err := placeAll(instances, 0, job.Kerf, []Rectangle{{Width: panel.Width, Height: panel.Height}}, make(map[string]struct{}))
+		if err != nil {
+			return Preview{}, err
+		}
+		if found {
+			result.Placements = placements
+			result.Unplaced = nil
+			result.FreeRectangles = remaining
+		}
+	}
 	return result, nil
+}
+
+func expandPieces(requirements []model.PieceRequirement) []pieceInstance {
+	var instances []pieceInstance
+	for pieceIndex, requirement := range requirements {
+		for quantityIndex := 1; quantityIndex <= requirement.Quantity; quantityIndex++ {
+			instances = append(instances, pieceInstance{
+				pieceIndex:    pieceIndex + 1,
+				quantityIndex: quantityIndex,
+				requirement:   requirement,
+			})
+		}
+	}
+	return instances
+}
+
+func placeAll(instances []pieceInstance, index, kerf int, free []Rectangle, dead map[string]struct{}) ([]model.Placement, []Rectangle, bool, error) {
+	if index == len(instances) {
+		return nil, free, true, nil
+	}
+	key := fmt.Sprintf("%d:%v", index, free)
+	if _, exists := dead[key]; exists {
+		return nil, nil, false, nil
+	}
+
+	instance := instances[index]
+	for freeIndex, candidate := range free {
+		for _, orientation := range orientations(instance.requirement) {
+			footprintWidth, ok := addKerf(orientation.width, kerf)
+			if !ok {
+				return nil, nil, false, fmt.Errorf("piece %q footprint exceeds integer range", instance.requirement.Label)
+			}
+			footprintHeight, ok := addKerf(orientation.height, kerf)
+			if !ok {
+				return nil, nil, false, fmt.Errorf("piece %q footprint exceeds integer range", instance.requirement.Label)
+			}
+			if footprintWidth > candidate.Width || footprintHeight > candidate.Height {
+				continue
+			}
+
+			nextFree := replaceFreeRectangle(free, freeIndex, candidate, footprintWidth, footprintHeight)
+			rest, remaining, found, err := placeAll(instances, index+1, kerf, nextFree, dead)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if !found {
+				continue
+			}
+			placement := model.Placement{
+				PieceIndex:    instance.pieceIndex,
+				Label:         instance.requirement.Label,
+				QuantityIndex: instance.quantityIndex,
+				X:             candidate.X,
+				Y:             candidate.Y,
+				Width:         orientation.width,
+				Height:        orientation.height,
+				FootprintW:    footprintWidth,
+				FootprintH:    footprintHeight,
+				Rotated:       orientation.rotated,
+			}
+			return append([]model.Placement{placement}, rest...), remaining, true, nil
+		}
+	}
+
+	dead[key] = struct{}{}
+	return nil, nil, false, nil
 }
 
 func orientations(requirement model.PieceRequirement) []orientation {
