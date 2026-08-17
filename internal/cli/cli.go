@@ -239,7 +239,8 @@ func runShow(args []string, path string, out io.Writer) error {
 		printReceipt(out, receipt)
 		return nil
 	}
-	job, exists := value.Jobs[*jobID]
+	normalizedJobID := strings.TrimSpace(*jobID)
+	job, exists := value.Jobs[normalizedJobID]
 	if !exists {
 		return fmt.Errorf("job %q does not exist", *jobID)
 	}

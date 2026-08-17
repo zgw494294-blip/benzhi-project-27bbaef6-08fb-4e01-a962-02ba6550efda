@@ -136,6 +136,7 @@ func AddPiece(value *model.Ledger, jobID string, piece model.PieceRequirement) e
 		return errors.New("ledger is required")
 	}
 	value.Normalize()
+	jobID = strings.TrimSpace(jobID)
 	job, exists := value.Jobs[jobID]
 	if !exists {
 		return fmt.Errorf("job %q does not exist", jobID)
@@ -153,6 +154,7 @@ func AddPiece(value *model.Ledger, jobID string, piece model.PieceRequirement) e
 }
 
 func PreviewJob(value model.Ledger, jobID string) (layout.Preview, error) {
+	jobID = strings.TrimSpace(jobID)
 	job, exists := value.Jobs[jobID]
 	if !exists {
 		return layout.Preview{}, fmt.Errorf("job %q does not exist", jobID)
@@ -169,6 +171,7 @@ func Commit(value *model.Ledger, jobID string) (model.Receipt, error) {
 		return model.Receipt{}, errors.New("ledger is required")
 	}
 	value.Normalize()
+	jobID = strings.TrimSpace(jobID)
 	job, exists := value.Jobs[jobID]
 	if !exists {
 		return model.Receipt{}, fmt.Errorf("job %q does not exist", jobID)
