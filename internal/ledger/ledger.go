@@ -199,15 +199,24 @@ func Commit(value *model.Ledger, jobID string) (model.Receipt, error) {
 		return model.Receipt{}, fmt.Errorf("receipt %q already exists", receiptID)
 	}
 	offcutIDs := make([]string, 0, len(preview.FreeRectangles))
+	reservedOffcutIDs := make(map[string]struct{}, len(preview.FreeRectangles))
 	for index, rectangle := range preview.FreeRectangles {
 		if rectangle.Width <= 0 || rectangle.Height <= 0 {
 			continue
 		}
-		offcutID := fmt.Sprintf("offcut-%s-%d", job.ID, index+1)
-		if _, exists := value.Stock[offcutID]; exists {
-			return model.Receipt{}, fmt.Errorf("offcut panel %q already exists", offcutID)
+		offcutNumber := index + 1
+		offcutID := fmt.Sprintf("offcut-%s-%d", job.ID, offcutNumber)
+		for {
+			_, stockExists := value.Stock[offcutID]
+			_, reserved := reservedOffcutIDs[offcutID]
+			if !stockExists && !reserved {
+				break
+			}
+			offcutNumber++
+			offcutID = fmt.Sprintf("offcut-%s-%d", job.ID, offcutNumber)
 		}
 		offcutIDs = append(offcutIDs, offcutID)
+		reservedOffcutIDs[offcutID] = struct{}{}
 	}
 
 	receipt := model.Receipt{
